@@ -350,7 +350,7 @@ export default function Page() {
             <div className="out">
               <div className="out-box">
                 {outUrl ? (
-                  <Image
+                  <NextImage
                     src={outUrl}
                     alt="output"
                     width={TARGET_WIDTH}
