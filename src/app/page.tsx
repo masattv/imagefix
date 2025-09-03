@@ -2,15 +2,25 @@
 
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import Cropper from 'react-easy-crop';
+import Image from 'next/image';
 
 const TARGET_WIDTH = 320;
 const TARGET_HEIGHT = 366;
 const TARGET_AR = TARGET_WIDTH / TARGET_HEIGHT;
 const MAX_BYTES = 2 * 1024 * 1024;
 
-// 初期合わせの見え方
-const DEFAULT_FACE_Y_FRACTION = 0.38; // 顔中心がやや上（0.0=上,1.0=下）
-const DESIRED_FACE_FRAC = 0.48;       // 顔高さ ≒ 出力高さの48%（値↑=さらに寄る）
+// 初期合わせ（顔を大きめ）
+const DEFAULT_FACE_Y_FRACTION = 0.38; // 顔中心をやや上に
+const DESIRED_FACE_FRAC = 0.48;       // 顔の高さ ≒ 出力高さの48%
+
+// FaceDetector 型を宣言（ts-ignore不要化）
+declare global {
+  interface Window {
+    FaceDetector?: new (opts?: { fastMode?: boolean; maxDetectedFaces?: number }) => {
+      detect: (source: CanvasImageSource) => Promise<Array<{ boundingBox: { x: number; y: number; width: number; height: number } }>>;
+    };
+  }
+}
 
 type DetectBox = { x: number; y: number; width: number; height: number } | null;
 
@@ -50,9 +60,7 @@ export default function Page() {
   /* -------------------- 顔検出（対応ブラウザのみ） -------------------- */
   const detectFace = useCallback(async (source: HTMLImageElement): Promise<DetectBox> => {
     try {
-      // @ts-ignore experimental API
-      if ('FaceDetector' in window) {
-        // @ts-ignore
+      if (typeof window !== 'undefined' && typeof window.FaceDetector === 'function') {
         const det = new window.FaceDetector({ fastMode: true, maxDetectedFaces: 1 });
         const faces = await det.detect(source);
         if (faces && faces[0]?.boundingBox) {
@@ -60,7 +68,9 @@ export default function Page() {
           return { x: b.x, y: b.y, width: b.width, height: b.height };
         }
       }
-    } catch {}
+    } catch {
+      // 対応外 or 例外時は null でフォールバック
+    }
     return null;
   }, []);
 
@@ -89,13 +99,12 @@ export default function Page() {
       cy = face.y + face.height / 2;
     }
 
-    const viewW = baseW / initZoom;
-    const viewH = baseH / initZoom;
-
-    let left = cx - viewW / 2;
+    const viewH = baseH / initZoom;      // ← viewW は未使用なので作らない（Lint回避）
+    let left = cx - (baseW / initZoom) / 2;
     let top  = cy - faceYFrac * viewH;
 
-    left = Math.max(0, Math.min(left, W - viewW));
+    // 画像内に収める
+    left = Math.max(0, Math.min(left, W - (baseW / initZoom)));
     top  = Math.max(0, Math.min(top,  H - viewH));
 
     const offsetX = - (left / W) * 100;
@@ -105,7 +114,6 @@ export default function Page() {
     setCrop({ x: offsetX, y: offsetY });
   }, [imgEl, detectFace, faceYFrac]);
 
-  // 画像が用意できたら一度自動合わせ
   useEffect(() => { if (imgEl) autoAlign(); }, [imgEl, autoAlign]);
 
   /* -------------------- 顔Y位置スライダ：Yのみ微調整 -------------------- */
@@ -114,18 +122,14 @@ export default function Page() {
     if (!imgEl) return;
     const W = imgEl.naturalWidth, H = imgEl.naturalHeight;
 
-    // zoom=1 の視野（アスペクト固定）
     let baseW: number, baseH: number;
     if (W / TARGET_AR <= H) { baseW = W; baseH = Math.round(W / TARGET_AR); }
     else { baseH = H; baseW = Math.round(H * TARGET_AR); }
 
-    const viewW = baseW / zoom;
-    const viewH = baseH / zoom;
-
+    const viewH = baseH / zoom;                 // ← viewW 生成せずにLint回避
     const curLeft = -crop.x * 0.01 * W;
     const curTop  = -crop.y * 0.01 * H;
 
-    // 現在の“顔中心近辺”のY（推定）：curTop + faceYFrac*viewH
     const cyApprox = curTop + faceYFrac * viewH;
     const newTop = Math.max(0, Math.min(cyApprox - v * viewH, H - viewH));
 
@@ -148,13 +152,13 @@ export default function Page() {
     return new Blob([u8], { type: mime });
   };
 
-  const makeJpegBlob = (canvas: HTMLCanvasElement, q: number) =>
+  const makeJpegBlob = useCallback((canvas: HTMLCanvasElement, q: number) =>
     new Promise<Blob>(res => {
       canvas.toBlob(b => {
         if (b) res(b);
         else res(dataURLtoBlob(canvas.toDataURL('image/jpeg', q)));
       }, 'image/jpeg', q);
-    });
+    }), []); // ← useCallback化して依存に入れられるようにする
 
   const encodeJpegUnder2MB = useCallback(async (canvas: HTMLCanvasElement) => {
     let lo = 0.5, hi = 0.95;
@@ -169,7 +173,7 @@ export default function Page() {
       best = { blob, q: 0.5 };
     }
     return best;
-  }, []);
+  }, [makeJpegBlob]); // ← 依存を追加（Lint対応）
 
   /* -------------------- 書き出し -------------------- */
   const doExport = useCallback(async () => {
@@ -184,8 +188,8 @@ export default function Page() {
       canvas.height = TARGET_HEIGHT;
       const ctx = canvas.getContext('2d')!;
       ctx.imageSmoothingEnabled = true;
-      // @ts-ignore
-      if (ctx.imageSmoothingQuality) ctx.imageSmoothingQuality = 'high';
+      // 型安全に（ts-ignore不要）
+      (ctx as any).imageSmoothingQuality = 'high';
       ctx.drawImage(imgEl, x, y, width, height, 0, 0, TARGET_WIDTH, TARGET_HEIGHT);
 
       const best = await encodeJpegUnder2MB(canvas);
@@ -341,7 +345,18 @@ export default function Page() {
 
             <div className="out">
               <div className="out-box">
-                {outUrl ? <img src={outUrl} width={TARGET_WIDTH} height={TARGET_HEIGHT} alt="output" /> : <div className="placeholder">まだ出力がありません</div>}
+                {outUrl ? (
+                  <Image
+                    src={outUrl}
+                    alt="output"
+                    width={TARGET_WIDTH}
+                    height={TARGET_HEIGHT}
+                    unoptimized
+                    priority
+                  />
+                ) : (
+                  <div className="placeholder">まだ出力がありません</div>
+                )}
               </div>
               <div className="out-info">
                 <div className="ibox"><div className="cap">サイズ</div><div className="val">{TARGET_WIDTH} × {TARGET_HEIGHT} px</div></div>
@@ -381,11 +396,11 @@ export default function Page() {
         body{margin:0;background:var(--bg);color:var(--txt);font-family:system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif}
         .hidden{display:none}
 
-        .header{position:sticky;top:0;z-index:10;backdrop-filter:saturate(180%) blur(8px);background:rgba(255,255,255,.8);border-bottom:1px solid var(--bd)}
-        .header .brand{display:flex;align-items:center;gap:8px;padding:10px 16px}
-        .header .pill{display:inline-block;font-size:12px;color:#52525b;background:#f4f4f5;border:1px solid #e4e4e7;border-radius:9999px;padding:2px 8px;margin-left:8px}
-        .header .link{margin-right:16px;border:1px solid var(--bd);padding:6px 8px;border-radius:8px;color:#52525b;text-decoration:none}
-        .header .link:hover{background:#fafafa}
+        .header{position:sticky;top:0;z-index:10;backdrop-filter:saturate(180%) blur(8px);background:rgba(255,255,255,.8);border-bottom:1px solid var(--bd);display:flex;justify-content:space-between;align-items:center}
+        .brand{display:flex;align-items:center;gap:8px;padding:10px 16px}
+        .pill{display:inline-block;font-size:12px;color:#52525b;background:#f4f4f5;border:1px solid #e4e4e7;border-radius:9999px;padding:2px 8px;margin-left:8px}
+        .link{margin-right:16px;border:1px solid var(--bd);padding:6px 8px;border-radius:8px;color:#52525b;text-decoration:none}
+        .link:hover{background:#fafafa}
 
         .container{max-width:1100px;margin:16px auto;padding:0 16px;display:grid;grid-template-columns:1.1fr .9fr;gap:16px}
         @media (max-width: 900px){ .container{grid-template-columns:1fr} }
@@ -406,7 +421,7 @@ export default function Page() {
         .dropzone{display:block;text-align:center;border:1px dashed var(--bd);border-radius:12px;background:#fafafa;padding:18px;cursor:pointer}
         .dz-icon{margin:0 auto 8px;display:grid;place-items:center;width:40px;height:40px;border-radius:9999px;background:#fff;box-shadow:0 1px 2px rgba(0,0,0,.05)}
         .dz-title{font-weight:600}
-        .dz-sub{font-size:12px;color:var(--muted);margin-top:4px}
+        .dz-sub{font-size:12px;color:#6b7280;margin-top:4px}
 
         .note{background:#f8fafc;border:1px solid var(--bd);border-radius:8px;padding:8px;margin-top:10px;font-size:13px;color:#334155}
         .note-title{font-weight:600;margin:0 0 6px 0}
@@ -454,7 +469,7 @@ export default function Page() {
   );
 }
 
-/* ====== SVG Icons（依存なし） ====== */
+/* ====== SVG Icons ====== */
 function LogoIcon(props: React.SVGProps<SVGSVGElement>) {
   return (
     <svg viewBox="0 0 24 24" {...props} width="20" height="20" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
