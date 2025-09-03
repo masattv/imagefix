@@ -2,6 +2,7 @@
 
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import Cropper from 'react-easy-crop';
+import type { Area } from 'react-easy-crop';
 import NextImage from 'next/image';
 
 const TARGET_WIDTH = 320;
@@ -35,7 +36,7 @@ export default function Page() {
   const [imgEl, setImgEl] = useState<HTMLImageElement | null>(null);
   const [crop, setCrop] = useState<{ x: number; y: number }>({ x: 0, y: 0 }); // %
   const [zoom, setZoom] = useState<number>(1);
-  const [croppedAreaPx, setCroppedAreaPx] = useState<{ x: number; y: number; width: number; height: number } | null>(null);
+  const [croppedAreaPx, setCroppedAreaPx] = useState<Area | null>(null);
   const [faceYFrac, setFaceYFrac] = useState<number>(DEFAULT_FACE_Y_FRACTION);
 
   // 出力
@@ -142,7 +143,9 @@ export default function Page() {
   }, [imgEl, zoom, crop, faceYFrac]);
 
   /* -------------------- Cropper 完了 -------------------- */
-  const onCropComplete = useCallback((_area, areaPx) => setCroppedAreaPx(areaPx), []);
+  const onCropComplete = useCallback((_area: Area, areaPx: Area) => {
+    setCroppedAreaPx(areaPx);
+  }, []);
 
   /* -------------------- JPG 圧縮（≤2MB） -------------------- */
   const dataURLtoBlob = (dataUrl: string) => {
