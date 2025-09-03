@@ -1,0 +1,6 @@
+﻿failures:
+  - date: "2025-09-03"
+    items:
+      - "git remote -v 出力空。しかし origin 設定は存在。git config で確認して push 成功。"
+      - "cmdで cat 使用エラー。type を使用。"
+      - "PowerShell here-string クォートミス。配列 + Set-Content で解決。"
