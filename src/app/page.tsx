@@ -24,6 +24,11 @@ declare global {
 
 type DetectBox = { x: number; y: number; width: number; height: number } | null;
 
+// Canvas 2D の拡張: imageSmoothingQuality を型で安全に扱う
+type Ctx2DWithQuality = CanvasRenderingContext2D & {
+  imageSmoothingQuality?: 'low' | 'medium' | 'high';
+};
+
 export default function Page() {
   // 画像 & Cropper
   const [srcUrl, setSrcUrl] = useState<string | null>(null);
@@ -79,10 +84,8 @@ export default function Page() {
     if (!imgEl) return;
     const W = imgEl.naturalWidth, H = imgEl.naturalHeight;
 
-    // zoom=1 の視野（アスペクト固定）
-    let baseW: number, baseH: number;
-    if (W / TARGET_AR <= H) { baseW = W; baseH = Math.round(W / TARGET_AR); }
-    else { baseH = H; baseW = Math.round(H * TARGET_AR); }
+    // zoom=1 の視野高さ（アスペクト固定）だけ計算
+    const baseH = (W / TARGET_AR <= H) ? Math.round(W / TARGET_AR) : H;
 
     const face = await detectFace(imgEl);
     let desiredH = baseH;
@@ -99,12 +102,14 @@ export default function Page() {
       cy = face.y + face.height / 2;
     }
 
-    const viewH = baseH / initZoom;      // ← viewW は未使用なので作らない（Lint回避）
-    let left = cx - (baseW / initZoom) / 2;
+    const viewH = baseH / initZoom;
+    const viewW = viewH * TARGET_AR;
+
+    let left = cx - viewW / 2;
     let top  = cy - faceYFrac * viewH;
 
     // 画像内に収める
-    left = Math.max(0, Math.min(left, W - (baseW / initZoom)));
+    left = Math.max(0, Math.min(left, W - viewW));
     top  = Math.max(0, Math.min(top,  H - viewH));
 
     const offsetX = - (left / W) * 100;
@@ -122,11 +127,9 @@ export default function Page() {
     if (!imgEl) return;
     const W = imgEl.naturalWidth, H = imgEl.naturalHeight;
 
-    let baseW: number, baseH: number;
-    if (W / TARGET_AR <= H) { baseW = W; baseH = Math.round(W / TARGET_AR); }
-    else { baseH = H; baseW = Math.round(H * TARGET_AR); }
+    const baseH = (W / TARGET_AR <= H) ? Math.round(W / TARGET_AR) : H;
+    const viewH = baseH / zoom;
 
-    const viewH = baseH / zoom;                 // ← viewW 生成せずにLint回避
     const curLeft = -crop.x * 0.01 * W;
     const curTop  = -crop.y * 0.01 * H;
 
@@ -158,7 +161,7 @@ export default function Page() {
         if (b) res(b);
         else res(dataURLtoBlob(canvas.toDataURL('image/jpeg', q)));
       }, 'image/jpeg', q);
-    }), []); // ← useCallback化して依存に入れられるようにする
+    }), []);
 
   const encodeJpegUnder2MB = useCallback(async (canvas: HTMLCanvasElement) => {
     let lo = 0.5, hi = 0.95;
@@ -173,7 +176,7 @@ export default function Page() {
       best = { blob, q: 0.5 };
     }
     return best;
-  }, [makeJpegBlob]); // ← 依存を追加（Lint対応）
+  }, [makeJpegBlob]);
 
   /* -------------------- 書き出し -------------------- */
   const doExport = useCallback(async () => {
@@ -186,10 +189,11 @@ export default function Page() {
       const canvas = document.createElement('canvas');
       canvas.width = TARGET_WIDTH;
       canvas.height = TARGET_HEIGHT;
-      const ctx = canvas.getContext('2d')!;
+      const ctx = canvas.getContext('2d') as Ctx2DWithQuality;
       ctx.imageSmoothingEnabled = true;
-      // 型安全に（ts-ignore不要）
-      (ctx as any).imageSmoothingQuality = 'high';
+      if (typeof ctx.imageSmoothingQuality !== 'undefined') {
+        ctx.imageSmoothingQuality = 'high';
+      }
       ctx.drawImage(imgEl, x, y, width, height, 0, 0, TARGET_WIDTH, TARGET_HEIGHT);
 
       const best = await encodeJpegUnder2MB(canvas);
@@ -328,7 +332,7 @@ export default function Page() {
               <button onClick={clearAll} className="btn outline">
                 <TrashIcon /> クリア
               </button>
-              <span className="muted">JPG / ≤ 2MB に自動調整</span>
+              <span className="muted">JPG / ≤ 2 MB に自動調整</span>
             </div>
 
             {msg && <div className="msg">{msg}</div>}
