@@ -2,7 +2,7 @@
 
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import Cropper from 'react-easy-crop';
-import Image from 'next/image';
+import NextImage from 'next/image';
 
 const TARGET_WIDTH = 320;
 const TARGET_HEIGHT = 366;
