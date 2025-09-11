@@ -1,14 +1,21 @@
 'use client';
 
-import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import Cropper from 'react-easy-crop';
 import type { Area } from 'react-easy-crop';
 import NextImage from 'next/image';
 
-const TARGET_WIDTH = 320;
-const TARGET_HEIGHT = 366;
-const TARGET_AR = TARGET_WIDTH / TARGET_HEIGHT;
+const ASPECT_W = 3;
+const ASPECT_H = 4; // 縦4:横3（portrait）
+const TARGET_AR = ASPECT_W / ASPECT_H;
 const MAX_BYTES = 2 * 1024 * 1024;
+
+// 既定の出力サイズ（3:4）
+const DEFAULT_OUT_WIDTH = 360;
+const DEFAULT_OUT_HEIGHT = 480;
+
+// プレビュー枠の見た目用（実際の出力サイズとは無関係）
+const PREVIEW_BOX_WIDTH = 300;
 
 // 初期合わせ（顔を大きめ）
 const DEFAULT_FACE_Y_FRACTION = 0.38; // 顔中心をやや上に
@@ -45,11 +52,34 @@ export default function Page() {
   const [busy, setBusy] = useState<boolean>(false);
   const [msg, setMsg] = useState<string>('');
 
+  // 出力サイズ（3:4固定で候補から選択）
+  const [outWidth, setOutWidth] = useState<number>(DEFAULT_OUT_WIDTH);
+  const [outHeight, setOutHeight] = useState<number>(DEFAULT_OUT_HEIGHT);
+
   /* -------------------- 画像ロード -------------------- */
-  const onPick = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
+  const onPick = useCallback(async (e: React.ChangeEvent<HTMLInputElement>) => {
     setOutUrl(null); setOutInfo(null); setMsg('');
     const f = e.target.files?.[0];
     if (!f) return;
+    const name = (f.name || '').toLowerCase();
+    const isHeic = f.type === 'image/heic' || f.type === 'image/heif' || name.endsWith('.heic') || name.endsWith('.heif');
+    if (isHeic) {
+      try {
+        setMsg('HEIC を変換中…');
+        const mod = await import('heic2any');
+        const heic2any: any = (mod as any).default || mod;
+        const converted = await heic2any({ blob: f, toType: 'image/jpeg', quality: 0.95 });
+        const blob: Blob = Array.isArray(converted) ? converted[0] : converted;
+        const url = URL.createObjectURL(blob);
+        setSrcUrl(url);
+        setMsg('');
+        return;
+      } catch (err) {
+        console.error('HEIC convert failed', err);
+        setMsg('HEICの読み込みに失敗しました。PNG/JPGに変換して再試行してください。');
+        return;
+      }
+    }
     const url = URL.createObjectURL(f);
     setSrcUrl(url);
   }, []);
@@ -181,6 +211,100 @@ export default function Page() {
     return best;
   }, [makeJpegBlob]);
 
+  // 元のクロップ解像度を上限とし、2MB以内で最も解像度が高い 3:4 サイズを探索
+  const findBestSizeAndEncode = useCallback(async (image: HTMLImageElement, cropPx: Area) => {
+    const srcW = Math.floor(cropPx.width);
+    const srcH = Math.floor(cropPx.height);
+    const maxW = srcW; // アップスケールしない
+    const maxH = srcH;
+
+    let lo = 0.2; // 最小スケール（20%）
+    let hi = 1.0; // 最大スケール（100%）
+    let best: { blob: Blob; q: number; w: number; h: number } | null = null;
+
+    for (let i = 0; i < 8; i++) {
+      const s = (lo + hi) / 2;
+      const w = Math.max(1, Math.floor(maxW * s));
+      const h = Math.max(1, Math.floor(maxH * s));
+
+      const c = document.createElement('canvas');
+      c.width = w; c.height = h;
+      const ctx = c.getContext('2d') as Ctx2DWithQuality;
+      ctx.imageSmoothingEnabled = true;
+      if (typeof ctx.imageSmoothingQuality !== 'undefined') ctx.imageSmoothingQuality = 'high';
+      ctx.drawImage(image, cropPx.x, cropPx.y, cropPx.width, cropPx.height, 0, 0, w, h);
+
+      const enc = await encodeJpegUnder2MB(c);
+      if (enc.blob.size <= MAX_BYTES) {
+        best = { blob: enc.blob, q: enc.q, w, h };
+        lo = s; // もっと大きくできるか試す
+      } else {
+        hi = s; // 小さくする
+      }
+    }
+
+    // どれも 2MB を超える場合は、最後に小さめに落として再トライ
+    if (!best) {
+      const targetW = Math.min(800, maxW);
+      const targetH = Math.round(targetW * (ASPECT_H / ASPECT_W));
+      const c = document.createElement('canvas');
+      c.width = targetW; c.height = targetH;
+      const ctx = c.getContext('2d') as Ctx2DWithQuality;
+      ctx.imageSmoothingEnabled = true;
+      if (typeof ctx.imageSmoothingQuality !== 'undefined') ctx.imageSmoothingQuality = 'high';
+      ctx.drawImage(image, cropPx.x, cropPx.y, cropPx.width, cropPx.height, 0, 0, targetW, targetH);
+      const enc = await encodeJpegUnder2MB(c);
+      best = { blob: enc.blob, q: enc.q, w: targetW, h: targetH };
+    }
+
+    return best;
+  }, [encodeJpegUnder2MB]);
+
+  // 表示用に最適サイズのみを事前見積もり（頻繁な操作に備えてデバウンス＆最新以外破棄）
+  const estimateSeq = useRef(0);
+  const findBestSizeOnly = useCallback(async (image: HTMLImageElement, cropPx: Area) => {
+    const srcW = Math.floor(cropPx.width);
+    const srcH = Math.floor(cropPx.height);
+    const maxW = srcW;
+    const maxH = srcH;
+
+    let lo = 0.2, hi = 1.0;
+    let best: { w: number; h: number } | null = null;
+    for (let i = 0; i < 6; i++) {
+      const s = (lo + hi) / 2;
+      const w = Math.max(1, Math.floor(maxW * s));
+      const h = Math.max(1, Math.floor(maxH * s));
+      const c = document.createElement('canvas');
+      c.width = w; c.height = h;
+      const ctx = c.getContext('2d') as Ctx2DWithQuality;
+      ctx.imageSmoothingEnabled = true;
+      if (typeof ctx.imageSmoothingQuality !== 'undefined') ctx.imageSmoothingQuality = 'high';
+      ctx.drawImage(image, cropPx.x, cropPx.y, cropPx.width, cropPx.height, 0, 0, w, h);
+      const enc = await encodeJpegUnder2MB(c);
+      if (enc.blob.size <= MAX_BYTES) { best = { w, h }; lo = s; } else { hi = s; }
+    }
+    if (!best) {
+      const w = Math.min(800, maxW);
+      const h = Math.round(w * (ASPECT_H / ASPECT_W));
+      return { w, h };
+    }
+    return best;
+  }, [encodeJpegUnder2MB]);
+
+  useEffect(() => {
+    if (!imgEl || !croppedAreaPx) return;
+    const mySeq = ++estimateSeq.current;
+    const t = setTimeout(async () => {
+      try {
+        const best = await findBestSizeOnly(imgEl, croppedAreaPx);
+        if (estimateSeq.current !== mySeq) return;
+        setOutWidth(best.w);
+        setOutHeight(best.h);
+      } catch {}
+    }, 200);
+    return () => clearTimeout(t);
+  }, [imgEl, croppedAreaPx, findBestSizeOnly]);
+
   /* -------------------- 書き出し -------------------- */
   const doExport = useCallback(async () => {
     if (!imgEl || !croppedAreaPx) return;
@@ -189,20 +313,12 @@ export default function Page() {
     try {
       const { x, y, width, height } = croppedAreaPx;
 
-      const canvas = document.createElement('canvas');
-      canvas.width = TARGET_WIDTH;
-      canvas.height = TARGET_HEIGHT;
-      const ctx = canvas.getContext('2d') as Ctx2DWithQuality;
-      ctx.imageSmoothingEnabled = true;
-      if (typeof ctx.imageSmoothingQuality !== 'undefined') {
-        ctx.imageSmoothingQuality = 'high';
-      }
-      ctx.drawImage(imgEl, x, y, width, height, 0, 0, TARGET_WIDTH, TARGET_HEIGHT);
-
-      const best = await encodeJpegUnder2MB(canvas);
+      const best = await findBestSizeAndEncode(imgEl, { x, y, width, height } as Area);
       const url = URL.createObjectURL(best.blob);
       setOutUrl(url);
       setOutInfo({ bytes: best.blob.size, q: best.q });
+      setOutWidth(best.w);
+      setOutHeight(best.h);
       setMsg('完了！プレビューを確認してください。');
     } catch (e) {
       console.error(e);
@@ -218,9 +334,9 @@ export default function Page() {
     if (!outUrl) return;
     const a = document.createElement('a');
     a.href = outUrl;
-    a.download = `id-photo_${TARGET_WIDTH}x${TARGET_HEIGHT}.jpg`;
+    a.download = `id-photo_${outWidth}x${outHeight}.jpg`;
     a.click();
-  }, [outUrl]);
+  }, [outUrl, outWidth, outHeight]);
 
   const clearAll = useCallback(() => {
     setSrcUrl(null); setImgEl(null); setOutUrl(null); setOutInfo(null); setMsg('');
@@ -233,7 +349,7 @@ export default function Page() {
       <header className="header">
         <div className="brand">
           <LogoIcon /> <b>ID Photo Maker</b>
-          <span className="pill">{TARGET_WIDTH}×{TARGET_HEIGHT} / JPG / ≤2MB</span>
+          <span className="pill">3:4 / JPG / ≤2MB</span>
         </div>
         <a href="#guide" className="link">ガイド</a>
       </header>
@@ -305,11 +421,9 @@ export default function Page() {
 
             <div className="grid3">
               <div>
-                <label className="label">出力サイズ</label>
-                <select className="select" value={`${TARGET_WIDTH}x${TARGET_HEIGHT}`} onChange={() => alert('今回は 320×366 固定です')}>
-                  <option>{TARGET_WIDTH} × {TARGET_HEIGHT}（推奨）</option>
-                </select>
-                <small className="hint">比率は自動で維持されます</small>
+                <label className="label">出力サイズ（自動）</label>
+                <div className="ibox">{outWidth} × {outHeight} px（最大解像度 / ≤2MB）</div>
+                <small className="hint">元画像のクロップ解像度を上限に自動決定</small>
               </div>
 
               <div>
@@ -327,7 +441,7 @@ export default function Page() {
 
             <div className="actions">
               <button onClick={doExport} disabled={!srcUrl || !imgEl || !croppedAreaPx || busy} className="btn primary">
-                <PlayIcon /> 320×366 に書き出し
+                <PlayIcon /> {outWidth}×{outHeight} に書き出し
               </button>
               <button onClick={autoAlign} disabled={!imgEl} className="btn outline">
                 <WandIcon /> 自動合わせ
@@ -356,17 +470,18 @@ export default function Page() {
                   <NextImage
                     src={outUrl}
                     alt="output"
-                    width={TARGET_WIDTH}
-                    height={TARGET_HEIGHT}
+                    width={outWidth}
+                    height={outHeight}
                     unoptimized
                     priority
+                    style={{ width: '100%', height: '100%', objectFit: 'contain' }}
                   />
                 ) : (
                   <div className="placeholder">まだ出力がありません</div>
                 )}
               </div>
               <div className="out-info">
-                <div className="ibox"><div className="cap">サイズ</div><div className="val">{TARGET_WIDTH} × {TARGET_HEIGHT} px</div></div>
+                <div className="ibox"><div className="cap">サイズ</div><div className="val">{outWidth} × {outHeight} px</div></div>
                 <div className="ibox"><div className="cap">形式</div><div className="val">JPEG（自動圧縮）</div></div>
                 <div className="ibox"><div className="cap">ファイルサイズ</div><div className="val">{prettySize}</div></div>
                 <div className="ibox"><div className="cap">品質</div><div className="val">{outInfo ? outInfo.q.toFixed(2) : '—'}</div></div>
@@ -434,7 +549,7 @@ export default function Page() {
         .note-title{font-weight:600;margin:0 0 6px 0}
         .note ul{margin:0;padding-left:16px}
 
-        .cropbox{position:relative;aspect-ratio:${TARGET_WIDTH}/${TARGET_HEIGHT};overflow:hidden;border:1px solid var(--bd);border-radius:12px;background:#f1f5f9}
+        .cropbox{position:relative;aspect-ratio:${ASPECT_W}/${ASPECT_H};overflow:hidden;border:1px solid var(--bd);border-radius:12px;background:#f1f5f9}
         .placeholder{position:absolute;inset:0;display:grid;place-items:center;color:#6b7280;font-size:14px}
         .guide-line{position:absolute;left:0;right:0;border-top:1px dashed rgba(16,185,129,.8);pointer-events:none}
 
@@ -461,7 +576,7 @@ export default function Page() {
 
         .out{display:flex;gap:12px;align-items:flex-start}
         @media (max-width: 900px){ .out{flex-direction:column} }
-        .out-box{position:relative;width:${TARGET_WIDTH}px;aspect-ratio:${TARGET_WIDTH}/${TARGET_HEIGHT};border:1px solid var(--bd);border-radius:8px;background:#fff;overflow:hidden}
+        .out-box{position:relative;width:${PREVIEW_BOX_WIDTH}px;aspect-ratio:${ASPECT_W}/${ASPECT_H};border:1px solid var(--bd);border-radius:8px;background:#fff;overflow:hidden}
         .out-info{flex:1}
         .ibox{background:#f8fafc;border:1px solid var(--bd);border-radius:8px;padding:8px;margin-bottom:8px}
         .ibox .cap{font-size:12px;color:#64748b}
