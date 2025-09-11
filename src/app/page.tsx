@@ -49,12 +49,15 @@ export default function Page() {
   // 出力
   const [outUrl, setOutUrl] = useState<string | null>(null);
   const [outInfo, setOutInfo] = useState<{ bytes: number; q: number } | null>(null);
+  const [outBlob, setOutBlob] = useState<Blob | null>(null);
   const [busy, setBusy] = useState<boolean>(false);
   const [msg, setMsg] = useState<string>('');
 
   // 出力サイズ（3:4固定で候補から選択）
   const [outWidth, setOutWidth] = useState<number>(DEFAULT_OUT_WIDTH);
   const [outHeight, setOutHeight] = useState<number>(DEFAULT_OUT_HEIGHT);
+  const [filename, setFilename] = useState<string>(`id-photo_${DEFAULT_OUT_WIDTH}x${DEFAULT_OUT_HEIGHT}`);
+  const [userEditedName, setUserEditedName] = useState<boolean>(false);
 
   /* -------------------- 画像ロード -------------------- */
   const onPick = useCallback(async (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -300,10 +303,11 @@ export default function Page() {
         if (estimateSeq.current !== mySeq) return;
         setOutWidth(best.w);
         setOutHeight(best.h);
+        if (!userEditedName) setFilename(`id-photo_${best.w}x${best.h}`);
       } catch {}
     }, 200);
     return () => clearTimeout(t);
-  }, [imgEl, croppedAreaPx, findBestSizeOnly]);
+  }, [imgEl, croppedAreaPx, findBestSizeOnly, userEditedName]);
 
   /* -------------------- 書き出し -------------------- */
   const doExport = useCallback(async () => {
@@ -317,6 +321,7 @@ export default function Page() {
       const url = URL.createObjectURL(best.blob);
       setOutUrl(url);
       setOutInfo({ bytes: best.blob.size, q: best.q });
+      setOutBlob(best.blob);
       setOutWidth(best.w);
       setOutHeight(best.h);
       setMsg('完了！プレビューを確認してください。');
@@ -331,12 +336,54 @@ export default function Page() {
   const prettySize = useMemo(() => outInfo ? (outInfo.bytes / (1024 * 1024)).toFixed(2) + ' MB' : '—', [outInfo]);
 
   const onDownload = useCallback(() => {
-    if (!outUrl) return;
+    if (!outBlob && !outUrl) return;
+    const safe = (filename || `id-photo_${outWidth}x${outHeight}`).replace(/[^\w\-_.]/g, '_');
+    const finalName = safe.toLowerCase().endsWith('.jpg') ? safe : `${safe}.jpg`;
+    const url = outBlob ? URL.createObjectURL(outBlob) : outUrl!;
     const a = document.createElement('a');
-    a.href = outUrl;
-    a.download = `id-photo_${outWidth}x${outHeight}.jpg`;
+    a.href = url;
+    a.download = finalName;
     a.click();
-  }, [outUrl, outWidth, outHeight]);
+    if (outBlob) setTimeout(() => URL.revokeObjectURL(url), 1000);
+  }, [outBlob, outUrl, outWidth, outHeight, filename]);
+
+  const onMobileSave = useCallback(async () => {
+    if (!outBlob) return;
+    const safe = (filename || `id-photo_${outWidth}x${outHeight}`).replace(/[^\w\-_.]/g, '_');
+    const finalName = safe.toLowerCase().endsWith('.jpg') ? safe : `${safe}.jpg`;
+    try {
+      if (navigator.canShare && navigator.canShare({ files: [new File([outBlob], finalName, { type: 'image/jpeg' })] })) {
+        await navigator.share({
+          files: [new File([outBlob], finalName, { type: 'image/jpeg' })],
+          title: 'ID Photo',
+          text: 'ID photo',
+        });
+        return;
+      }
+    } catch {}
+    try {
+      if (typeof window !== 'undefined' && typeof (window as any).showSaveFilePicker === 'function') {
+        const opts = {
+          suggestedName: finalName,
+          types: [{ description: 'JPEG Image', accept: { 'image/jpeg': ['.jpg'] } }],
+          excludeAcceptAllOption: true,
+          startIn: 'pictures' as unknown,
+        };
+        const handle = await (window as any).showSaveFilePicker(opts);
+        if (handle && 'createWritable' in handle) {
+          const writable = await (handle as { createWritable: () => Promise<unknown> }).createWritable();
+          if (writable && typeof (writable as { write: (b: Blob) => Promise<void> }).write === 'function') {
+            await (writable as { write: (b: Blob) => Promise<void>; close: () => Promise<void> }).write(outBlob);
+            await (writable as { close: () => Promise<void> }).close();
+            return;
+          }
+        }
+      }
+    } catch {}
+    const url = URL.createObjectURL(outBlob);
+    window.open(url, '_blank');
+    setTimeout(() => URL.revokeObjectURL(url), 2000);
+  }, [outBlob, outWidth, outHeight, filename]);
 
   const clearAll = useCallback(() => {
     setSrcUrl(null); setImgEl(null); setOutUrl(null); setOutInfo(null); setMsg('');
@@ -427,6 +474,18 @@ export default function Page() {
               </div>
 
               <div>
+                <label className="label">ファイル名</label>
+                <input
+                  type="text"
+                  className="select"
+                  value={filename}
+                  onChange={(e) => { setFilename(e.target.value); setUserEditedName(true); }}
+                  placeholder={`id-photo_${outWidth}x${outHeight}`}
+                />
+                <small className="hint">拡張子は自動で .jpg が付きます</small>
+              </div>
+
+              <div>
                 <label className="label">ズーム</label>
                 <input type="range" min={1} max={5} step={0.01} className="range" value={zoom} onChange={(e) => setZoom(parseFloat(e.target.value))} />
                 <small className="hint">ホイール / ピンチでも操作可</small>
@@ -487,8 +546,11 @@ export default function Page() {
                 <div className="ibox"><div className="cap">品質</div><div className="val">{outInfo ? outInfo.q.toFixed(2) : '—'}</div></div>
 
                 <div className="actions mt">
-                  <button onClick={onDownload} disabled={!outUrl} className="btn success">
+                  <button onClick={onDownload} disabled={!outUrl && !outBlob} className="btn success">
                     <DownloadIcon /> JPG をダウンロード
+                  </button>
+                  <button onClick={onMobileSave} disabled={!outBlob} className="btn outline">
+                    <DownloadIcon /> スマホに保存
                   </button>
                 </div>
               </div>
