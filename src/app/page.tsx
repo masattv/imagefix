@@ -636,7 +636,11 @@ export default function Page() {
         .head{margin-bottom:4px}
         .label{display:block;font-size:12px;color:#475569;margin-bottom:4px}
         .select,.range{width:100%}
-        .select{padding:8px 10px;border:1px solid var(--bd);border-radius:10px;background:#fff}
+        .select{padding:8px 10px;border:1px solid var(--bd);border-radius:10px;background:#fff;color:var(--txt);color-scheme:light}
+        input.select::placeholder{color:#9ca3af}
+        input.select:-webkit-autofill,
+        input.select:-webkit-autofill:hover,
+        input.select:-webkit-autofill:focus{ -webkit-text-fill-color:#111; box-shadow:0 0 0px 1000px #fff inset; -webkit-box-shadow:0 0 0px 1000px #fff inset }
         .range{accent-color:#111}
 
         .actions{display:flex;flex-wrap:wrap;align-items:center;gap:8px;margin-top:10px}
