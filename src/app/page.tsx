@@ -27,7 +27,25 @@ declare global {
     FaceDetector?: new (opts?: { fastMode?: boolean; maxDetectedFaces?: number }) => {
       detect: (source: CanvasImageSource) => Promise<Array<{ boundingBox: { x: number; y: number; width: number; height: number } }>>;
     };
+    showSaveFilePicker?: (options?: SaveFilePickerOptions) => Promise<FileSystemFileHandle>;
   }
+}
+
+// File System Access API (minimal typings to avoid any)
+interface SaveFilePickerOptions {
+  suggestedName?: string;
+  types?: Array<{ description?: string; accept: Record<string, string[]> }>;
+  excludeAcceptAllOption?: boolean;
+  startIn?: 'desktop' | 'documents' | 'downloads' | 'music' | 'pictures' | 'videos';
+}
+
+interface FileSystemWritableFileStream {
+  write: (data: Blob | BufferSource | string) => Promise<void>;
+  close: () => Promise<void>;
+}
+
+interface FileSystemFileHandle {
+  createWritable: () => Promise<FileSystemWritableFileStream>;
 }
 
 type DetectBox = { x: number; y: number; width: number; height: number } | null;
@@ -362,21 +380,19 @@ export default function Page() {
       }
     } catch {}
     try {
-      if (typeof window !== 'undefined' && typeof (window as any).showSaveFilePicker === 'function') {
-        const opts = {
+      if (typeof window !== 'undefined' && typeof window.showSaveFilePicker === 'function') {
+        const opts: SaveFilePickerOptions = {
           suggestedName: finalName,
           types: [{ description: 'JPEG Image', accept: { 'image/jpeg': ['.jpg'] } }],
           excludeAcceptAllOption: true,
-          startIn: 'pictures' as unknown,
+          startIn: 'pictures',
         };
-        const handle = await (window as any).showSaveFilePicker(opts);
-        if (handle && 'createWritable' in handle) {
-          const writable = await (handle as { createWritable: () => Promise<unknown> }).createWritable();
-          if (writable && typeof (writable as { write: (b: Blob) => Promise<void> }).write === 'function') {
-            await (writable as { write: (b: Blob) => Promise<void>; close: () => Promise<void> }).write(outBlob);
-            await (writable as { close: () => Promise<void> }).close();
-            return;
-          }
+        const handle = await window.showSaveFilePicker(opts);
+        if (handle && typeof handle.createWritable === 'function') {
+          const writable = await handle.createWritable();
+          await writable.write(outBlob);
+          await writable.close();
+          return;
         }
       }
     } catch {}
