@@ -66,10 +66,10 @@ export default function Page() {
     if (isHeic) {
       try {
         setMsg('HEIC を変換中…');
-        const mod = await import('heic2any');
-        const heic2any: any = (mod as any).default || mod;
+        // heic2any は ESM/CJS の両形態に対応するため default を前提にする
+        const heic2any = (await import('heic2any')).default as (opts: { blob: Blob; toType: string; quality?: number }) => Promise<Blob | Blob[]>;
         const converted = await heic2any({ blob: f, toType: 'image/jpeg', quality: 0.95 });
-        const blob: Blob = Array.isArray(converted) ? converted[0] : converted;
+        const blob: Blob = Array.isArray(converted) ? converted[0] : converted as Blob;
         const url = URL.createObjectURL(blob);
         setSrcUrl(url);
         setMsg('');
@@ -326,7 +326,7 @@ export default function Page() {
     } finally {
       setBusy(false);
     }
-  }, [imgEl, croppedAreaPx, encodeJpegUnder2MB]);
+  }, [imgEl, croppedAreaPx, findBestSizeAndEncode]);
 
   const prettySize = useMemo(() => outInfo ? (outInfo.bytes / (1024 * 1024)).toFixed(2) + ' MB' : '—', [outInfo]);
 
