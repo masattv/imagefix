@@ -353,22 +353,35 @@ export default function Page() {
 
   const prettySize = useMemo(() => outInfo ? (outInfo.bytes / (1024 * 1024)).toFixed(2) + ' MB' : '—', [outInfo]);
 
+  // 日本語などUnicodeを保持しつつ、ファイル名として不正な文字だけを除去
+  const sanitizeFileName = useCallback((name: string, fallback: string) => {
+    let n = (name || fallback).trim();
+    if (!n) n = fallback;
+    // Windows等で使えない文字を置換
+    n = n.replace(/[\\/:*?"<>|]/g, '_');
+    // 連続空白を1つに
+    n = n.replace(/\s+/g, ' ');
+    // 長すぎる名前を適度に切る
+    if (n.length > 150) n = n.slice(0, 150);
+    return n;
+  }, []);
+
   const onDownload = useCallback(() => {
     if (!outBlob && !outUrl) return;
-    const safe = (filename || `id-photo_${outWidth}x${outHeight}`).replace(/[^\w\-_.]/g, '_');
-    const finalName = safe.toLowerCase().endsWith('.jpg') ? safe : `${safe}.jpg`;
+    const base = sanitizeFileName(filename, `id-photo_${outWidth}x${outHeight}`);
+    const finalName = /\.jpe?g$/i.test(base) ? base : `${base}.jpg`;
     const url = outBlob ? URL.createObjectURL(outBlob) : outUrl!;
     const a = document.createElement('a');
     a.href = url;
     a.download = finalName;
     a.click();
     if (outBlob) setTimeout(() => URL.revokeObjectURL(url), 1000);
-  }, [outBlob, outUrl, outWidth, outHeight, filename]);
+  }, [outBlob, outUrl, outWidth, outHeight, filename, sanitizeFileName]);
 
   const onMobileSave = useCallback(async () => {
     if (!outBlob) return;
-    const safe = (filename || `id-photo_${outWidth}x${outHeight}`).replace(/[^\w\-_.]/g, '_');
-    const finalName = safe.toLowerCase().endsWith('.jpg') ? safe : `${safe}.jpg`;
+    const base = sanitizeFileName(filename, `id-photo_${outWidth}x${outHeight}`);
+    const finalName = /\.jpe?g$/i.test(base) ? base : `${base}.jpg`;
     try {
       if (navigator.canShare && navigator.canShare({ files: [new File([outBlob], finalName, { type: 'image/jpeg' })] })) {
         await navigator.share({
